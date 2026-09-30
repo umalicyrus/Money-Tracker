@@ -15,7 +15,17 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->statefulApi();
         $middleware->trustHosts(
-            at: fn () => ['^'.preg_quote((string) parse_url(config('app.url'), PHP_URL_HOST)).'$'],
+            at: function (): array {
+                $appHost = parse_url((string) config('app.url'), PHP_URL_HOST);
+
+                return array_values(array_filter([
+                    is_string($appHost) && $appHost !== '' ? '^'.preg_quote($appHost, '/').'$' : null,
+                    '^.+\.up\.railway\.app$',
+                    '^.+\.railway\.app$',
+                    '^localhost$',
+                    '^127\.0\.0\.1$',
+                ]));
+            },
             subdomains: false,
         );
 
