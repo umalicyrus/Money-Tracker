@@ -5,12 +5,12 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://replace-with-your-api.duckdns.org/api/:path*" },
-    { "source": "/sanctum/:path*", "destination": "https://replace-with-your-api.duckdns.org/sanctum/:path*" },
-    { "source": "/login", "destination": "https://replace-with-your-api.duckdns.org/login" },
-    { "source": "/logout", "destination": "https://replace-with-your-api.duckdns.org/logout" },
-    { "source": "/up", "destination": "https://replace-with-your-api.duckdns.org/up" },
-    { "source": "/storage/:path*", "destination": "https://replace-with-your-api.duckdns.org/storage/:path*" },
+    { "source": "/api/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/api/:path*" },
+    { "source": "/sanctum/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/sanctum/:path*" },
+    { "source": "/login", "destination": "https://money-tracker-production-3852.up.railway.app/login" },
+    { "source": "/logout", "destination": "https://money-tracker-production-3852.up.railway.app/logout" },
+    { "source": "/up", "destination": "https://money-tracker-production-3852.up.railway.app/up" },
+    { "source": "/storage/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/storage/:path*" },
     { "source": "/((?!api(?:/|$)|sanctum(?:/|$)|login(?:/|$)|logout(?:/|$)|up(?:/|$)|storage(?:/|$)|assets/|sw\\.js$|manifest\\.webmanifest$|app-icon\\.svg$|favicon\\.svg$|icons\\.svg$).*)", "destination": "/index.html" }
   ],
   "headers": [
