@@ -1,0 +1,15 @@
+.env.deploy
+.env.deploy.*
+!.env.deploy.example
+.chrome-check/
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+**/auth.json
+**/*.pem
+**/*.key
+*.sql
+*.sql.gz
+*.dump
+*.backup

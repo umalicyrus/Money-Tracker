@@ -1,0 +1,83 @@
+name: moneytracker
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: moneytracker
+      MARIADB_USER: moneytracker
+      MARIADB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env.deploy}
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env.deploy}
+    volumes:
+      - database:/var/lib/mysql
+    networks: [database]
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+  app:
+    build: {context: ., target: app}
+    image: moneytracker-app:${RELEASE_TAG:-local}
+    restart: unless-stopped
+    environment:
+      APP_NAME: Money Tracker
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:?Set APP_KEY in .env.deploy}
+      APP_URL: https://${APP_HOST:?Set APP_HOST in .env.deploy}
+      FRONTEND_URL: ${FRONTEND_URL:?Set the exact Vercel production origin in .env.deploy}
+      SANCTUM_STATEFUL_DOMAINS: ${SANCTUM_STATEFUL_DOMAINS:?Set the exact Vercel production hostname in .env.deploy}
+      DB_CONNECTION: mariadb
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_DATABASE: moneytracker
+      DB_USERNAME: moneytracker
+      DB_PASSWORD: ${DB_PASSWORD}
+      SESSION_DRIVER: database
+      SESSION_COOKIE: moneytracker_session
+      SESSION_SECURE_COOKIE: "true"
+      SESSION_HTTP_ONLY: "true"
+      SESSION_SAME_SITE: lax
+      SESSION_DOMAIN: "null"
+      SESSION_PATH: /
+      CACHE_STORE: database
+      QUEUE_CONNECTION: sync
+      FILESYSTEM_DISK: local
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: warning
+    volumes:
+      - uploads:/var/www/html/storage/app
+    networks: [edge, database]
+    depends_on:
+      db: {condition: service_healthy}
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+  web:
+    build: {context: ., target: web}
+    image: moneytracker-web:${RELEASE_TAG:-local}
+    restart: unless-stopped
+    environment:
+      APP_HOST: ${APP_HOST}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in .env.deploy}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - certificates:/data
+    networks: [edge]
+    depends_on: [app]
+    logging:
+      driver: local
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  edge:
+  database:
+    internal: true
+volumes:
+  database: {external: true, name: moneytracker_mariadb}
+  uploads: {external: true, name: moneytracker_uploads}
+  certificates: {external: true, name: moneytracker_caddy}
