@@ -4,6 +4,8 @@ import TransactionHistory from '../../transactions/components/TransactionHistory
 import type { FormEvent } from 'react'
 import {
   calculateWalletBalance,
+  archiveWalletAndOperation,
+  deleteTransactionAndOperation,
   downloadServerRecords,
   listBudgets,
   listCategories,
@@ -17,6 +19,9 @@ import {
   saveWalletAndOperation,
   syncPendingOperations,
   updateCategoryAndOperation,
+  updateTransactionAndOperation,
+  updateWalletAndOperation,
+  decimalAmountFromMinor,
   type Wallet,
   type Budget,
   type Category,
@@ -26,10 +31,13 @@ import {
 } from '../lib/walletSync'
 import { formatMinorUnits } from '../lib/money'
 import { calculateBudgetProgress } from '../lib/budgetSummary'
-import { itemizedTransactionItems, type ItemInput } from '../lib/itemizedTotals'
+import { itemizedTotalMinor, itemizedTransactionItems, type ItemInput } from '../lib/itemizedTotals'
+import { activeWalletRecords } from '../lib/walletVisibility'
 import CategoryIcon from '../components/CategoryIcon'
 import { categoryIcons } from '../components/categoryIconCatalog'
 import AppIcon from '../../../components/AppIcon'
+import RecordActionsMenu from '../../../components/RecordActionsMenu'
+import ConfirmActionDialog from '../../../components/ConfirmActionDialog'
 import './WalletsPage.css'
 
 const maxCategoryImageBytes = 60 * 1024
@@ -58,6 +66,9 @@ type WalletsPageProps = {
   selectedMonth?: string
   onSelectedMonthChange?: (month: string) => void
   onCancelTransaction?: () => void
+  onTransactionSaved?: (type: 'income' | 'expense' | 'transfer', transactionId: string, updated?: boolean) => void
+  onTransactionDeleted?: (transactionId: string, offline: boolean) => void
+  onTransactionSyncState?: (transactionId: string, state: 'waiting' | 'synced' | 'error') => void
   moreSection?: 'categories' | 'budgets'
   onWalletsChange: (wallets: Wallet[]) => void
   onCategoriesChange: (categories: Category[]) => void
@@ -76,6 +87,9 @@ export default function WalletsPage({
   selectedMonth,
   onSelectedMonthChange,
   onCancelTransaction,
+  onTransactionSaved,
+  onTransactionDeleted,
+  onTransactionSyncState,
   moreSection = 'categories',
   onWalletsChange,
   onCategoriesChange,
@@ -85,6 +99,7 @@ export default function WalletsPage({
   const [name, setName] = useState('')
   const [type, setType] = useState<WalletType>('cash')
   const [walletFormOpen, setWalletFormOpen] = useState(false)
+  const [editingWalletId, setEditingWalletId] = useState<string | null>(null)
   const [amountsVisible, setAmountsVisible] = useState(true)
   const walletTriggerRef = useRef<HTMLButtonElement | null>(null)
   const walletNameRef = useRef<HTMLInputElement | null>(null)
@@ -93,6 +108,7 @@ export default function WalletsPage({
   const [formError, setFormError] = useState('')
   const [storageError, setStorageError] = useState('')
   const [status, setStatus] = useState('')
+  const [walletNotice, setWalletNotice] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [retrying, setRetrying] = useState(false)
   const [pendingCount, setPendingCount] = useState(0)
@@ -129,6 +145,31 @@ export default function WalletsPage({
   const [expenseItems, setExpenseItems] = useState<ItemInput[]>([{ name: '', quantity: '1', unitPrice: '' }])
   const [transactionType, setTransactionType] =
   useState<'income' | 'expense' | 'transfer'>(initialTransactionType)
+  const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null)
+  const [confirmAction, setConfirmAction] = useState<
+    | { kind: 'transaction'; record: Transaction; trigger: HTMLButtonElement }
+    | { kind: 'wallet'; record: Wallet; trigger: HTMLButtonElement }
+    | null
+  >(null)
+  const [actionProcessing, setActionProcessing] = useState(false)
+  const actionProcessingRef = useRef(false)
+  const [confirmationError, setConfirmationError] = useState('')
+  const transactionHeadingRef = useRef<HTMLHeadingElement>(null)
+  const transactionFormWasOpen = useRef(false)
+
+  useEffect(() => {
+    const formOpen = view === 'transactions' && transactionMode === 'create'
+    if (transactionFormWasOpen.current && view === 'transactions' && !formOpen) {
+      transactionHeadingRef.current?.focus({ preventScroll: true })
+    }
+    transactionFormWasOpen.current = formOpen
+  }, [view, transactionMode])
+
+  useEffect(() => {
+    if (!walletNotice) return
+    const timeout = window.setTimeout(() => setWalletNotice(''), 5000)
+    return () => window.clearTimeout(timeout)
+  }, [walletNotice])
 
   const refreshWallets = useCallback(async () => {
     const [savedWallets, savedCategories, savedTransactions, savedBudgets, pending] = await Promise.all([
@@ -200,17 +241,19 @@ export default function WalletsPage({
     setSubmitting(true)
 
     try {
-      await saveWalletAndOperation(userId, {
-        name,
-        type,
-        openingDate,
-        openingBalance,
-      })
+      const editingWallet = wallets.find((wallet) => wallet.id === editingWalletId)
+      if (editingWallet) {
+        await updateWalletAndOperation(userId, editingWallet, { name, type, openingDate, openingBalance })
+      } else {
+        await saveWalletAndOperation(userId, { name, type, openingDate, openingBalance })
+      }
       setName('')
       setOpeningBalance('0.00')
+      setEditingWalletId(null)
       setWalletFormOpen(false)
       requestAnimationFrame(() => walletTriggerRef.current?.focus())
-      setStatus('Saved on this device. Waiting to sync.')
+      setStatus(editingWallet ? 'Wallet updated successfully. Waiting to sync.' : 'Saved on this device. Waiting to sync.')
+      if (editingWallet) setWalletNotice('Wallet updated successfully.')
       await refreshWallets()
       await syncWallets()
     } catch (error) {
@@ -218,6 +261,75 @@ export default function WalletsPage({
       else setStorageError('Could not save this wallet on your device. Try again.')
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  function beginWalletEdit(wallet: Wallet, trigger: HTMLButtonElement): void {
+    walletTriggerRef.current = trigger
+    setEditingWalletId(wallet.id)
+    setName(wallet.name)
+    setType(wallet.type)
+    setOpeningBalance(decimalAmountFromMinor(wallet.openingBalanceMinor))
+    setOpeningDate(wallet.openingDate)
+    setFormError('')
+    setWalletFormOpen(true)
+  }
+
+  function beginTransactionEdit(transaction: Transaction): void {
+    setEditingTransactionId(transaction.id)
+    setTransactionType(transaction.type)
+    setExpenseWalletId(transaction.walletId)
+    setDestinationWalletId(transaction.destinationWalletId ?? '')
+    setExpenseCategoryId(transaction.categoryId ?? '')
+    setExpenseAmount(decimalAmountFromMinor(transaction.amountMinor))
+    setExpenseDate(transaction.transactionDate)
+    setExpenseNote(transaction.note ?? '')
+    setItemizedExpense(Boolean(transaction.items?.length))
+    setExpenseItems(transaction.items?.map((item) => ({ name: item.name, quantity: String(item.quantity), unitPrice: decimalAmountFromMinor(item.unitPriceMinor) })) ?? [{ name: '', quantity: '1', unitPrice: '' }])
+    setFormError('')
+  }
+
+  async function confirmRecordAction(): Promise<void> {
+    if (!confirmAction || actionProcessingRef.current) return
+    const action = confirmAction
+    const offline = !navigator.onLine
+    actionProcessingRef.current = true
+    setActionProcessing(true)
+    setConfirmationError('')
+
+    try {
+      if (action.kind === 'transaction') {
+        const deleted = await deleteTransactionAndOperation(userId, action.record)
+        setConfirmAction(null)
+        setStatus(offline ? 'Transaction deleted on this device. Waiting to sync.' : 'Transaction deleted.')
+        onTransactionDeleted?.(deleted.id, offline)
+        await refreshWallets()
+        requestAnimationFrame(() => (action.trigger.isConnected ? action.trigger : transactionHeadingRef.current)?.focus())
+        if (!offline) {
+          void (async () => {
+            try {
+              await syncWallets()
+              const saved = (await listTransactions(userId)).find((transaction) => transaction.id === deleted.id)
+              onTransactionSyncState?.(deleted.id, saved?.localStatus === 'synced' ? 'synced' : saved?.localStatus === 'error' ? 'error' : 'waiting')
+            } catch {
+              onTransactionSyncState?.(deleted.id, 'waiting')
+            }
+          })()
+        }
+      } else {
+        await archiveWalletAndOperation(userId, action.record)
+        setConfirmAction(null)
+        setStatus(offline ? 'Wallet archived on this device. Waiting to sync.' : 'Wallet archived.')
+        setWalletNotice('Wallet archived.')
+        await refreshWallets()
+        requestAnimationFrame(() => (action.trigger.isConnected ? action.trigger : document.getElementById('wallets-heading'))?.focus())
+        if (!offline) void syncWallets().catch(() => setStatus('Could not sync yet. Your changes remain saved locally.'))
+      }
+    } catch (error) {
+      setConfirmationError(error instanceof Error ? error.message : 'Could not complete this action.')
+    } finally {
+      actionProcessingRef.current = false
+      setActionProcessing(false)
     }
   }
 
@@ -357,40 +469,76 @@ export default function WalletsPage({
     event.preventDefault()
     setFormError('')
     setSubmitting(true)
+    let savedTransactionId = ''
+    const editingTransaction = transactions.find((transaction) => transaction.id === editingTransactionId)
+    const itemsToSave = transactionType === 'expense' && (itemizedExpense || Boolean(editingTransaction?.items?.length)) ? expenseItems : undefined
 
     try {
-      if (transactionType === 'transfer') {
-        await saveTransferAndOperation(userId, {
+      if (editingTransaction) {
+        const savedTransaction = await updateTransactionAndOperation(userId, editingTransaction, {
+          type: transactionType,
+          walletId: expenseWalletId,
+          destinationWalletId,
+          categoryId: expenseCategoryId,
+          amount: expenseAmount,
+          transactionDate: expenseDate,
+          note: expenseNote,
+          items: itemsToSave,
+        })
+        savedTransactionId = savedTransaction.id
+      } else if (transactionType === 'transfer') {
+        const savedTransaction = await saveTransferAndOperation(userId, {
           sourceWalletId: expenseWalletId,
           destinationWalletId,
           amount: expenseAmount,
           transactionDate: expenseDate,
           note: expenseNote,
         })
+        savedTransactionId = savedTransaction.id
       } else {
-        await saveTransactionAndOperation(userId, {
+        const savedTransaction = await saveTransactionAndOperation(userId, {
           type: transactionType,
           walletId: expenseWalletId,
           categoryId: expenseCategoryId,
           amount: expenseAmount,
           transactionDate: expenseDate,
           note: expenseNote,
-          items: transactionType === 'expense' && itemizedExpense ? expenseItems : undefined,
+          items: itemsToSave,
         })
+        savedTransactionId = savedTransaction.id
       }
-      setExpenseAmount('')
-      setExpenseNote('')
-      setDestinationWalletId('')
-      setItemizedExpense(false)
-      setExpenseItems([{ name: '', quantity: '1', unitPrice: '' }])
-      setStatus('Saved on this device. Waiting to sync.')
-      await refreshWallets()
-      await syncWallets()
     } catch (error) {
       setFormError(error instanceof Error ? error.message : `Could not save this ${transactionType}.`)
+      return
     } finally {
       setSubmitting(false)
     }
+
+    setExpenseAmount('')
+    setExpenseNote('')
+    setDestinationWalletId('')
+    setItemizedExpense(false)
+    setExpenseItems([{ name: '', quantity: '1', unitPrice: '' }])
+    const wasUpdated = editingTransactionId !== null
+    setEditingTransactionId(null)
+    setStatus(wasUpdated ? 'Transaction updated successfully. Waiting to sync.' : 'Saved on this device. Waiting to sync.')
+    onTransactionSaved?.(transactionType, savedTransactionId, wasUpdated)
+
+    void (async () => {
+      try {
+        await refreshWallets()
+        await syncWallets()
+      } catch {
+        setStatus('Could not sync yet. Your change remains saved locally.')
+      }
+      try {
+        const savedTransaction = (await listTransactions(userId)).find((transaction) => transaction.id === savedTransactionId)
+        const syncState = savedTransaction?.localStatus === 'synced' ? 'synced' : savedTransaction?.localStatus === 'error' ? 'error' : 'waiting'
+        onTransactionSyncState?.(savedTransactionId, syncState)
+      } catch {
+        onTransactionSyncState?.(savedTransactionId, 'waiting')
+      }
+    })()
   }
 
   const budgetMonth = selectedMonth ?? localBudgetMonth
@@ -398,7 +546,7 @@ export default function WalletsPage({
   const expenseCategories = categories.filter((category) => category.type === 'expense' && !category.isArchived)
   const itemizedTotal = (() => {
     try {
-      return itemizedTransactionItems(expenseItems).reduce((total, item) => total + BigInt(item.lineTotalMinor), 0n).toString()
+      return itemizedTotalMinor(expenseItems)
     } catch {
       return ''
     }
@@ -410,33 +558,37 @@ export default function WalletsPage({
 
   if (view === 'data-only') return null
 
-  const totalWalletBalance = wallets.filter((wallet) => wallet.deletedAt == null).reduce((total, wallet) => total + BigInt(calculateWalletBalance(wallet, transactions)), 0n).toString()
+  const activeWallets = activeWalletRecords(wallets)
+  const totalWalletBalance = activeWallets.reduce((total, wallet) => total + BigInt(calculateWalletBalance(wallet, transactions)), 0n).toString()
   const totalIncome = transactions.filter((transaction) => transaction.type === 'income' && transaction.deletedAt == null).reduce((total, transaction) => total + BigInt(transaction.amountMinor), 0n).toString()
   const totalExpense = transactions.filter((transaction) => transaction.type === 'expense' && transaction.deletedAt == null).reduce((total, transaction) => total + BigInt(transaction.amountMinor), 0n).toString()
   const visibleCategories = categories.filter((category) => category.type === categoryTab)
   const isCategoriesView = view === 'more' && moreSection === 'categories'
+  const isTransactionForm = view === 'transactions' && (transactionMode === 'create' || editingTransactionId !== null)
+  const selectedTransactionCategory = categories.find((category) => category.id === expenseCategoryId)
   const headingId = isCategoriesView ? 'categories-heading' : 'wallets-heading'
   const visibleAmount = (amount: string) => amountsVisible ? formatMinorUnits(amount) : '••••••'
 
   return (
-    <section className={`wallets-panel wallets-view-${view}`} aria-labelledby={headingId}>
-      <div className="section-heading">
+    <section className={`wallets-panel wallets-view-${view}`} aria-labelledby={isTransactionForm ? 'transaction-form-title' : headingId}>
+      {!isTransactionForm && <div className="section-heading">
         <div>
-          <h2 id={headingId}>
+          <h2 id={headingId} ref={view === 'transactions' ? transactionHeadingRef : undefined} tabIndex={view === 'transactions' || view === 'wallets' ? -1 : undefined}>
             {view === 'transactions'
               ? transactionMode === 'create' ? transactionType === 'transfer' ? 'Transfer between wallets' : `Add ${transactionType}` : 'Transactions'
               : view === 'more' ? moreSection === 'budgets' ? 'Monthly budgets' : 'Categories' : 'Wallets'}
           </h2>
         </div>
         {isCategoriesView ? <button type="button" className="add-category-button" onClick={(event) => openCategoryDialog(event.currentTarget)}><AppIcon name="plus" /> Add category</button> : pendingCount > 0 && <span className="pending-badge">{pendingCount} waiting</span>}
-      </div>
+      </div>}
 
       {storageError && (
         <p className="form-error" role="alert">{storageError}</p>
       )}
+      {walletNotice && <p className="wallet-update-notice" role="status">{walletNotice}</p>}
 
-      {view === 'transactions' && transactionMode === 'history' && (
-        <TransactionHistory key={initialHistoryMonth} transactions={transactions} wallets={wallets} categories={categories} initialMonth={initialHistoryMonth} />
+      {view === 'transactions' && transactionMode === 'history' && editingTransactionId === null && (
+        <TransactionHistory key={initialHistoryMonth} transactions={transactions} wallets={wallets} categories={categories} initialMonth={initialHistoryMonth} onEdit={beginTransactionEdit} onDelete={(record, trigger) => { setConfirmationError(''); setConfirmAction({ kind: 'transaction', record, trigger }) }} />
       )}
 
       {view === 'wallets' && (
@@ -449,9 +601,9 @@ export default function WalletsPage({
         </section>
       )}
 
-      {view === 'wallets' && wallets.length > 0 && (
+      {view === 'wallets' && activeWallets.length > 0 && (
         <div className="wallet-list">
-          {wallets.map((wallet) => (
+          {activeWallets.map((wallet) => (
             <article className="wallet-item" key={wallet.id}>
               <span className="wallet-type-icon"><AppIcon name={wallet.type === 'bank' ? 'bank' : wallet.type === 'ewallet' ? 'card' : /savings?/i.test(wallet.name) ? 'savings' : 'wallet'} /></span>
               <div className="wallet-details">
@@ -461,20 +613,21 @@ export default function WalletsPage({
               <div className="wallet-amount">
                 <strong aria-label={amountsVisible ? undefined : 'Amount hidden'}>{visibleAmount(calculateWalletBalance(wallet, transactions))}</strong>
                 <span className={`wallet-status wallet-status-${wallet.localStatus}`}>
-                  {wallet.localStatus === 'synced' ? 'Synced' : wallet.localStatus === 'error' ? 'Needs attention' : 'Waiting to sync'}
+                  {wallet.localStatus === 'synced' ? 'Synced' : wallet.localStatus === 'error' ? wallet.lastError ?? 'Needs attention' : 'Waiting to sync'}
                 </span>
               </div>
+              <RecordActionsMenu label={`Actions for ${wallet.name} wallet`} editLabel="Edit wallet" editDisabled={submitting || wallet.localStatus !== 'synced'} onEdit={(trigger) => beginWalletEdit(wallet, trigger)} dangerLabel="Archive wallet" dangerDisabled={submitting || wallet.localStatus !== 'synced'} onDanger={(trigger) => { setConfirmationError(''); setConfirmAction({ kind: 'wallet', record: wallet, trigger }) }} />
             </article>
           ))}
         </div>
       )}
 
-      {view === 'wallets' && wallets.length === 0 && <p className="wallet-empty-state">No wallets yet. Add a wallet to start tracking your money.</p>}
+      {view === 'wallets' && activeWallets.length === 0 && <p className="wallet-empty-state">No active wallets. Add a wallet to start tracking your money.</p>}
 
-      {view === 'wallets' && !walletFormOpen && <button ref={walletTriggerRef} type="button" className="add-wallet-button" onClick={() => setWalletFormOpen(true)}><AppIcon name="plus" /> Add wallet</button>}
+      {view === 'wallets' && !walletFormOpen && <button ref={walletTriggerRef} type="button" className="add-wallet-button" onClick={() => { setEditingWalletId(null); setName(''); setType('cash'); setOpeningBalance('0.00'); setOpeningDate(today); setWalletFormOpen(true) }}><AppIcon name="plus" /> Add wallet</button>}
 
       {view === 'wallets' && walletFormOpen && <form className="wallet-form" onSubmit={handleSubmit}>
-        <h3>Add wallet</h3>
+        <h3>{editingWalletId ? 'Edit wallet' : 'Add wallet'}</h3>
         <label htmlFor="wallet-name">Wallet name</label>
         <input
           id="wallet-name"
@@ -515,9 +668,9 @@ export default function WalletsPage({
         {formError && <p className="form-error" role="alert">{formError}</p>}
 
         <button type="submit" disabled={submitting}>
-          {submitting ? 'Saving wallet…' : 'Save wallet'}
+          {submitting ? 'Saving wallet…' : editingWalletId ? 'Save changes' : 'Save wallet'}
         </button>
-        <button type="button" className="secondary-button" disabled={submitting} onClick={() => { setWalletFormOpen(false); setFormError(''); requestAnimationFrame(() => walletTriggerRef.current?.focus()) }}>Cancel</button>
+        <button type="button" className="secondary-button" disabled={submitting} onClick={() => { setWalletFormOpen(false); setEditingWalletId(null); setFormError(''); requestAnimationFrame(() => walletTriggerRef.current?.focus()) }}>Cancel</button>
       </form>}
 
       <div className="sync-status" aria-live="polite">
@@ -574,76 +727,130 @@ export default function WalletsPage({
         </section>}
       </section>}
 
-      {view === 'transactions' && transactionMode === 'create' && <section className="expense-panel" aria-labelledby="wallets-heading">
-        {onCancelTransaction && (
-          <button type="button" className="text-button" onClick={onCancelTransaction} disabled={submitting}>
-            ← Cancel
-          </button>
-        )}
-        <form className="category-form" onSubmit={handleExpenseSubmit}>
-          <label htmlFor="transaction-type">Type</label>
-          <select
-            id="transaction-type"
-            value={transactionType}
-            onChange={(event) => {
-              setTransactionType(event.target.value as 'income' | 'expense' | 'transfer')
-              setExpenseCategoryId('')
-              setDestinationWalletId('')
-              setFormError('')
-            }}
-          >
-            <option value="expense">Expense</option>
-            <option value="income">Income</option>
-            <option value="transfer">Transfer</option>
-          </select>
-          <label htmlFor="expense-wallet">{transactionType === 'transfer' ? 'From wallet' : 'Wallet'}</label>
-          <select id="expense-wallet" value={expenseWalletId} onChange={(event) => setExpenseWalletId(event.target.value)} required>
-            <option value="">Choose a wallet</option>
-            {wallets.filter((wallet) => !wallet.isArchived && !wallet.deletedAt).map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.name}</option>)}
-          </select>
-          {transactionType === 'transfer' ? <>
-            <label htmlFor="destination-wallet">To wallet</label>
-            <select id="destination-wallet" value={destinationWalletId} onChange={(event) => setDestinationWalletId(event.target.value)} required>
-              <option value="">Choose a destination wallet</option>
-              {wallets.filter((wallet) => wallet.id !== expenseWalletId && !wallet.isArchived && !wallet.deletedAt).map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.name}</option>)}
-            </select>
-          </> : <>
-            <label htmlFor="expense-category">{transactionType === 'income' ? 'Income category' : 'Expense category'}</label>
-            <select id="expense-category" value={expenseCategoryId} onChange={(event) => setExpenseCategoryId(event.target.value)} required>
-              <option value="">Choose a category</option>
-              {categories.filter((category) => category.type === transactionType && !category.isArchived).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
-            </select>
-          </>}
-          {transactionType === 'expense' && <label className="itemized-toggle"><input type="checkbox" checked={itemizedExpense} onChange={(event) => setItemizedExpense(event.target.checked)} /> Add item details</label>}
-          {itemizedExpense && transactionType === 'expense' ? <section className="itemized-expense" aria-label="Expense items">
-            <h3>Items</h3>
-            {expenseItems.map((item, index) => {
-              const lineTotal = (() => {
-                try {
-                  return itemizedTransactionItems([item])[0]?.lineTotalMinor ?? ''
-                } catch {
-                  return ''
-                }
-              })()
-              return <div className="item-row" key={index}>
-                <input aria-label={`Item ${index + 1} name`} value={item.name} onChange={(event) => updateExpenseItem(index, { name: event.target.value })} placeholder="Item name" />
-                <input aria-label={`Item ${index + 1} quantity`} inputMode="numeric" value={item.quantity} onChange={(event) => updateExpenseItem(index, { quantity: event.target.value })} placeholder="Qty" />
-                <input aria-label={`Item ${index + 1} unit price`} inputMode="decimal" value={item.unitPrice} onChange={(event) => updateExpenseItem(index, { unitPrice: event.target.value })} placeholder="Unit price" />
-                <strong>{lineTotal ? formatMinorUnits(lineTotal) : '—'}</strong>
-                {expenseItems.length > 1 && <button type="button" className="text-button" onClick={() => setExpenseItems((items) => items.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>}
+      {isTransactionForm && <section className={`expense-panel transaction-form transaction-form-${transactionType}`}>
+        <header className="transaction-form-header">
+          <h2 id="transaction-form-title">{editingTransactionId ? 'Edit transaction' : transactionType === 'transfer' ? 'Transfer between wallets' : `Add ${transactionType}`}</h2>
+          {onCancelTransaction && (
+            <button type="button" className="transaction-cancel" onClick={() => { if (editingTransactionId) { setEditingTransactionId(null); setFormError('') } else onCancelTransaction() }} disabled={submitting}>Cancel</button>
+          )}
+        </header>
+        <form className="transaction-entry-form" onSubmit={handleExpenseSubmit}>
+          <div className="transaction-form-surface">
+            <div className="transaction-field transaction-amount-field">
+              <label htmlFor="transaction-amount">Amount<span className="sr-only"> in Philippine pesos</span></label>
+              <div className="transaction-amount-control">
+                <span aria-hidden="true">₱</span>
+                <input id="transaction-amount" inputMode="decimal" placeholder="0.00" value={expenseAmount} onChange={(event) => setExpenseAmount(event.target.value)} required />
               </div>
-            })}
-            <button type="button" className="retry-button" onClick={() => setExpenseItems((items) => [...items, { name: '', quantity: '1', unitPrice: '' }])}>Add item</button>
-            <p className="itemized-total">Transaction total <strong>{itemizedTotal ? formatMinorUnits(itemizedTotal) : 'Enter item details'}</strong></p>
-          </section> : <><label htmlFor="expense-amount">Amount (₱)</label><input id="expense-amount" inputMode="decimal" value={expenseAmount} onChange={(event) => setExpenseAmount(event.target.value)} required /></>}
-          <label htmlFor="expense-date">Date</label>
-          <input id="expense-date" type="date" max={today} value={expenseDate} onChange={(event) => setExpenseDate(event.target.value)} required />
-          <label htmlFor="expense-note">Note (optional)</label>
-          <input id="expense-note" maxLength={500} value={expenseNote} onChange={(event) => setExpenseNote(event.target.value)} />
+            </div>
+            <div className="transaction-field">
+              <label htmlFor="transaction-type">Type</label>
+              <select
+                id="transaction-type"
+                value={transactionType}
+                onChange={(event) => {
+                  setTransactionType(event.target.value as 'income' | 'expense' | 'transfer')
+                  setExpenseCategoryId('')
+                  setDestinationWalletId('')
+                  setFormError('')
+                }}
+              >
+                <option value="expense">Expense</option>
+                <option value="income">Income</option>
+                <option value="transfer">Transfer</option>
+              </select>
+              <svg className="transaction-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </div>
+            <div className="transaction-field transaction-field-with-icon">
+              <label htmlFor="expense-wallet">{transactionType === 'transfer' ? 'From wallet' : 'Wallet'}</label>
+              <span className="transaction-field-icon transaction-wallet-icon"><AppIcon name="wallet" /></span>
+              <select id="expense-wallet" value={expenseWalletId} onChange={(event) => setExpenseWalletId(event.target.value)} required>
+                <option value="">Choose a wallet</option>
+                {wallets.filter((wallet) => !wallet.isArchived && !wallet.deletedAt).map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.name}</option>)}
+              </select>
+              <svg className="transaction-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+            </div>
+            {transactionType === 'transfer' ? (
+              <div className="transaction-field transaction-field-with-icon">
+                <label htmlFor="destination-wallet">To wallet</label>
+                <span className="transaction-field-icon transaction-wallet-icon"><AppIcon name="wallet" /></span>
+                <select id="destination-wallet" value={destinationWalletId} onChange={(event) => setDestinationWalletId(event.target.value)} required>
+                  <option value="">Choose a destination wallet</option>
+                  {wallets.filter((wallet) => wallet.id !== expenseWalletId && !wallet.isArchived && !wallet.deletedAt).map((wallet) => <option key={wallet.id} value={wallet.id}>{wallet.name}</option>)}
+                </select>
+                <svg className="transaction-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </div>
+            ) : (
+              <div className="transaction-field transaction-field-with-icon">
+                <label htmlFor="expense-category">{transactionType === 'income' ? 'Income category' : 'Expense category'}</label>
+                <span className={`transaction-field-icon transaction-category-icon-${transactionType}`}>
+                  <CategoryIcon name={selectedTransactionCategory?.icon ?? (transactionType === 'income' ? 'salary' : 'food')} image={selectedTransactionCategory?.iconImage} />
+                </span>
+                <select id="expense-category" value={expenseCategoryId} onChange={(event) => setExpenseCategoryId(event.target.value)} required>
+                  <option value="">Choose a category</option>
+                  {categories.filter((category) => category.type === transactionType && !category.isArchived).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}
+                </select>
+                <svg className="transaction-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </div>
+            )}
+            <div className="transaction-field transaction-date-field">
+              <label htmlFor="expense-date">Date</label>
+              <input id="expense-date" type="date" max={today} value={expenseDate} onChange={(event) => setExpenseDate(event.target.value)} required />
+            </div>
+            <div className="transaction-field transaction-field-with-icon transaction-note-field">
+              <label htmlFor="expense-note">Note (optional)</label>
+              <span className="transaction-field-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l5 5v13H6zM15 3v6h5M9 13h8M9 17h8" /></svg></span>
+              <input id="expense-note" maxLength={500} value={expenseNote} onChange={(event) => setExpenseNote(event.target.value)} placeholder="Add a note..." />
+            </div>
+            {transactionType === 'expense' && (
+              <button className="transaction-items-toggle" type="button" aria-expanded={itemizedExpense} aria-controls="transaction-items" onClick={() => setItemizedExpense(!itemizedExpense)}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h12M9 12h12M9 18h8" /><circle cx="4" cy="6" r="1" /><circle cx="4" cy="12" r="1" /><circle cx="4" cy="18" r="1" /></svg>
+                <span>Add item details</span>
+                <svg className="transaction-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+              </button>
+            )}
+            {itemizedExpense && transactionType === 'expense' && <section id="transaction-items" className="itemized-expense" aria-label="Expense items">
+              <header className="itemized-heading"><h3>Item details</h3><p>Add individual purchases</p></header>
+              {expenseItems.map((item, index) => {
+                const lineTotal = (() => {
+                  try {
+                    return itemizedTransactionItems([item])[0]?.lineTotalMinor ?? ''
+                  } catch {
+                    return ''
+                  }
+                })()
+                return <div className="item-row" key={index}>
+                  <div className="item-row-top"><label htmlFor={`item-name-${index}`}>Name<input id={`item-name-${index}`} value={item.name} onChange={(event) => updateExpenseItem(index, { name: event.target.value })} placeholder="Item name" required /></label><button type="button" className="item-remove" aria-label={`Remove ${item.name.trim() || `item ${index + 1}`}`} onClick={() => setExpenseItems((items) => items.length === 1 ? [{ name: '', quantity: '1', unitPrice: '' }] : items.filter((_, itemIndex) => itemIndex !== index))}><AppIcon name="trash" /></button></div>
+                  <div className="item-row-bottom"><label htmlFor={`item-qty-${index}`}>Qty<input id={`item-qty-${index}`} inputMode="numeric" value={item.quantity} onChange={(event) => updateExpenseItem(index, { quantity: event.target.value })} required /></label><label htmlFor={`item-price-${index}`}>Unit price (₱)<input id={`item-price-${index}`} inputMode="decimal" value={item.unitPrice} onChange={(event) => updateExpenseItem(index, { unitPrice: event.target.value })} placeholder="0.00" required /></label><div className="item-line-total"><span>Total</span><strong>{lineTotal ? formatMinorUnits(lineTotal) : '—'}</strong></div></div>
+                </div>
+              })}
+              <button type="button" className="item-add-button" onClick={() => setExpenseItems((items) => [...items, { name: '', quantity: '1', unitPrice: '' }])}><AppIcon name="plus" /> Add another item</button>
+            </section>}
+          </div>
+          {itemizedExpense && transactionType === 'expense' && <div className="itemized-subtotal"><div><strong>Items subtotal</strong><span>{expenseItems.length} item{expenseItems.length === 1 ? '' : 's'}</span></div><strong>{itemizedTotal ? formatMinorUnits(itemizedTotal) : '—'}</strong></div>}
           {formError && <p className="form-error" role="alert">{formError}</p>}
-          <button type="submit" disabled={submitting || wallets.filter((wallet) => !wallet.isArchived && !wallet.deletedAt).length < (transactionType === 'transfer' ? 2 : 1) || (transactionType !== 'transfer' && categories.filter((category) => category.type === transactionType).length === 0)}>{submitting ? `Saving ${transactionType}…` : transactionType === 'transfer' ? 'Save transfer' : `Save ${transactionType}`}</button>
+          <button className="transaction-save-button" type="submit" disabled={submitting || wallets.filter((wallet) => !wallet.isArchived && !wallet.deletedAt).length < (transactionType === 'transfer' ? 2 : 1) || (transactionType !== 'transfer' && categories.filter((category) => category.type === transactionType).length === 0)}>{submitting ? `Saving ${transactionType}…` : transactionType === 'transfer' ? 'Save transfer' : `Save ${transactionType}`}</button>
         </form>
       </section>}
+      {confirmAction && <ConfirmActionDialog
+        title={confirmAction.kind === 'transaction' ? 'Delete this transaction?' : 'Archive this wallet?'}
+        description={confirmAction.kind === 'transaction' ? <>
+          <p>This removes the transaction from balances, budgets, charts, and active history.</p>
+          <dl className="confirm-action-details">
+            <dt>Type</dt><dd>{confirmAction.record.type[0].toUpperCase() + confirmAction.record.type.slice(1)}</dd>
+            <dt>Category</dt><dd>{confirmAction.record.type === 'transfer' ? 'Wallet transfer' : categories.find((category) => category.id === confirmAction.record.categoryId)?.name ?? 'Unknown category'}</dd>
+            <dt>Date</dt><dd>{new Date(`${confirmAction.record.transactionDate}T00:00:00`).toLocaleDateString()}</dd>
+            <dt>Amount</dt><dd>{formatMinorUnits(confirmAction.record.amountMinor)}</dd>
+          </dl>
+        </> : <><p>Existing transactions will remain in your history.</p><p>The wallet will be removed from active wallet lists and totals.</p></>}
+        confirmLabel={confirmAction.kind === 'transaction' ? 'Delete transaction' : 'Archive wallet'}
+        confirmFirst={confirmAction.kind === 'wallet'}
+        processing={actionProcessing}
+        error={confirmationError}
+        returnFocus={confirmAction.trigger}
+        onCancel={() => { setConfirmAction(null); setConfirmationError('') }}
+        onConfirm={() => { void confirmRecordAction() }}
+      />}
     </section>
   )
 }

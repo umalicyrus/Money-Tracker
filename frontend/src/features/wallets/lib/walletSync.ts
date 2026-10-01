@@ -1,7 +1,7 @@
 import axios from 'axios'
 import { api } from '../../../lib/api/client'
 import { keepsLocalRecord } from './localRecordProtection'
-import { itemizedTransactionItems, type ItemInput, type TransactionItem } from './itemizedTotals'
+import { itemizedTransactionItems, requireMatchingItemSubtotal, type ItemInput, type TransactionItem } from './itemizedTotals'
 import { calculateWalletBalance as calculateBalance } from './walletBalance'
 
 export type WalletType = 'cash' | 'bank' | 'ewallet'
@@ -84,12 +84,12 @@ type CategoryPayload = {
 type TransactionPayload = {
   type: 'income' | 'expense' | 'transfer'
   wallet_id: string
-  destination_wallet_id?: string
-  category_id?: string
+  destination_wallet_id: string | null
+  category_id: string | null
   amount_minor: string
   transaction_date: string
   note: string | null
-  items?: Array<{ name: string; quantity: number; unit_price_minor: string }>
+  items: Array<{ name: string; quantity: number; unit_price_minor: string }> | null
 }
 
 type BudgetPayload = {
@@ -343,6 +343,53 @@ export async function saveCategoryAndOperation(
   return category
 }
 
+export async function updateWalletAndOperation(
+  userId: string,
+  wallet: Wallet,
+  input: { name: string; type: WalletType; openingDate: string; openingBalance: string },
+): Promise<Wallet> {
+  if (wallet.userId !== userId || wallet.version === '0' || wallet.localStatus !== 'synced') throw new Error('Wait for this wallet to sync before changing it again.')
+  if (wallet.isArchived || wallet.deletedAt != null) throw new Error('Archived or deleted wallets cannot be edited.')
+  const name = input.name.trim().replace(/\s+/g, ' ')
+  if (!name || name.length > 60) throw new Error('Enter a wallet name of 60 characters or fewer.')
+  const openingBalanceMinor = parseMinorUnits(input.openingBalance)
+  const operationId = crypto.randomUUID()
+  const payload: WalletPayload = { name, type: input.type, opening_date: input.openingDate, opening_balance_minor: openingBalanceMinor, currency: 'PHP' }
+  const envelope = { operation_id: operationId, device_id: deviceId(), entity_type: 'wallets', entity_id: wallet.id, action: 'update', base_version: wallet.version, payload }
+  const updated: Wallet = { ...wallet, name, type: input.type, openingDate: input.openingDate, openingBalanceMinor, localStatus: 'pending', lastError: undefined }
+  const operation: PendingOperation = { operationId, userId, deviceId: envelope.device_id, entityId: wallet.id, payload, frozenEnvelope: envelope, status: 'pending' }
+  const database = await openDatabase()
+  const transaction = database.transaction([walletStore, operationStore], 'readwrite')
+  transaction.objectStore(walletStore).put(updated)
+  transaction.objectStore(operationStore).put(operation)
+  await transactionComplete(transaction)
+  database.close()
+  return updated
+}
+
+export async function archiveWalletAndOperation(userId: string, wallet: Wallet): Promise<Wallet> {
+  if (wallet.userId !== userId || wallet.version === '0' || wallet.localStatus !== 'synced') throw new Error('Wait for this wallet to sync before archiving it.')
+  if (wallet.isArchived || wallet.deletedAt != null) throw new Error('This wallet is already archived or deleted.')
+  const operationId = crypto.randomUUID()
+  const payload: WalletPayload = {
+    name: wallet.name,
+    type: wallet.type,
+    opening_date: wallet.openingDate,
+    opening_balance_minor: wallet.openingBalanceMinor,
+    currency: wallet.currency,
+  }
+  const envelope = { operation_id: operationId, device_id: deviceId(), entity_type: 'wallets', entity_id: wallet.id, action: 'delete', base_version: wallet.version, payload }
+  const archived: Wallet = { ...wallet, isArchived: true, localStatus: 'pending', lastError: undefined }
+  const operation: PendingOperation = { operationId, userId, deviceId: envelope.device_id, entityId: wallet.id, payload, frozenEnvelope: envelope, status: 'pending' }
+  const database = await openDatabase()
+  const transaction = database.transaction([walletStore, operationStore], 'readwrite')
+  transaction.objectStore(walletStore).put(archived)
+  transaction.objectStore(operationStore).put(operation)
+  await transactionComplete(transaction)
+  database.close()
+  return archived
+}
+
 export async function updateCategoryAndOperation(
   userId: string,
   category: Category,
@@ -401,21 +448,21 @@ export async function saveTransactionAndOperation(
   input: { type: 'income' | 'expense'; walletId: string; categoryId: string; amount: string; transactionDate: string; note: string; items?: ItemInput[] },
 ): Promise<Transaction> {
   const items = input.type === 'expense' && input.items && input.items.length > 0 ? itemizedTransactionItems(input.items) : undefined
-  const amountMinor = items
-    ? items.reduce((total, item) => total + BigInt(item.lineTotalMinor), 0n).toString()
-    : parseMinorUnits(input.amount)
+  const amountMinor = parseMinorUnits(input.amount)
   if (BigInt(amountMinor) <= 0n) throw new Error('Enter an amount greater than zero.')
+  if (items) requireMatchingItemSubtotal(amountMinor, items)
 
   const id = crypto.randomUUID()
   const operationId = crypto.randomUUID()
   const payload: TransactionPayload = {
     type: input.type,
     wallet_id: input.walletId,
+    destination_wallet_id: null,
     category_id: input.categoryId,
     amount_minor: amountMinor,
     transaction_date: input.transactionDate,
     note: input.note.trim() || null,
-    ...(items ? { items: items.map((item) => ({ name: item.name, quantity: item.quantity, unit_price_minor: item.unitPriceMinor })) } : {}),
+    items: items ? items.map((item) => ({ name: item.name, quantity: item.quantity, unit_price_minor: item.unitPriceMinor })) : null,
   }
   const envelope = {
     operation_id: operationId,
@@ -482,9 +529,11 @@ export async function saveTransferAndOperation(
     type: 'transfer',
     wallet_id: input.sourceWalletId,
     destination_wallet_id: input.destinationWalletId,
+    category_id: null,
     amount_minor: amountMinor,
     transaction_date: input.transactionDate,
     note: input.note.trim() || null,
+    items: null,
   }
   const envelope = { operation_id: operationId, device_id: deviceId(), entity_type: 'transactions', entity_id: id, action: 'create', base_version: '0', payload }
   const transfer: Transaction = {
@@ -510,6 +559,78 @@ export async function saveTransferAndOperation(
 
   return transfer
 }
+
+function decimalAmountFromMinor(value: string): string {
+  const minor = BigInt(value)
+  const sign = minor < 0n ? '-' : ''
+  const absolute = minor < 0n ? -minor : minor
+  return `${sign}${absolute / 100n}.${(absolute % 100n).toString().padStart(2, '0')}`
+}
+
+export async function updateTransactionAndOperation(
+  userId: string,
+  existing: Transaction,
+  input: { type: 'income' | 'expense' | 'transfer'; walletId: string; destinationWalletId?: string; categoryId?: string; amount: string; transactionDate: string; note: string; items?: ItemInput[] },
+): Promise<Transaction> {
+  if (existing.userId !== userId || existing.version === '0' || existing.localStatus !== 'synced') throw new Error('Wait for this transaction to sync before changing it again.')
+  if (existing.deletedAt != null) throw new Error('Deleted transactions cannot be edited.')
+  if (input.type === 'transfer' && input.walletId === input.destinationWalletId) throw new Error('Choose two different wallets for a transfer.')
+  const items = input.type === 'expense' && input.items && input.items.length > 0 ? itemizedTransactionItems(input.items) : undefined
+  const amountMinor = parseMinorUnits(input.amount)
+  if (BigInt(amountMinor) <= 0n) throw new Error('Enter an amount greater than zero.')
+  if (items) requireMatchingItemSubtotal(amountMinor, items)
+  const wallets = await listWallets(userId)
+  const activeWalletIds = new Set(wallets.filter((wallet) => !wallet.isArchived && wallet.deletedAt == null).map((wallet) => wallet.id))
+  if (!activeWalletIds.has(input.walletId) || (input.type === 'transfer' && (!input.destinationWalletId || !activeWalletIds.has(input.destinationWalletId)))) throw new Error('Choose active wallets in your workspace.')
+  const operationId = crypto.randomUUID()
+  const payload: TransactionPayload = {
+    type: input.type, wallet_id: input.walletId, destination_wallet_id: input.type === 'transfer' ? input.destinationWalletId ?? null : null,
+    category_id: input.type === 'transfer' ? null : input.categoryId ?? null, amount_minor: amountMinor, transaction_date: input.transactionDate,
+    note: input.note.trim() || null, items: items ? items.map((item) => ({ name: item.name, quantity: item.quantity, unit_price_minor: item.unitPriceMinor })) : null,
+  }
+  const envelope = { operation_id: operationId, device_id: deviceId(), entity_type: 'transactions', entity_id: existing.id, action: 'update', base_version: existing.version, payload }
+  const updated: Transaction = {
+    ...existing, type: input.type, walletId: input.walletId, destinationWalletId: payload.destination_wallet_id ?? undefined,
+    categoryId: payload.category_id, amountMinor, transactionDate: input.transactionDate, note: payload.note,
+    ...(items ? { items } : { items: undefined }), localStatus: 'pending', lastError: undefined,
+  }
+  const operation: PendingOperation = { operationId, userId, deviceId: envelope.device_id, entityId: existing.id, payload, frozenEnvelope: envelope, status: 'pending' }
+  const database = await openDatabase()
+  const transaction = database.transaction([transactionStore, operationStore], 'readwrite')
+  transaction.objectStore(transactionStore).put(updated)
+  transaction.objectStore(operationStore).put(operation)
+  await transactionComplete(transaction)
+  database.close()
+  return updated
+}
+
+export async function deleteTransactionAndOperation(userId: string, existing: Transaction): Promise<Transaction> {
+  if (existing.userId !== userId || existing.version === '0' || existing.localStatus !== 'synced') throw new Error('Wait for this transaction to sync before deleting it.')
+  if (existing.deletedAt != null) throw new Error('This transaction is already deleted.')
+  const operationId = crypto.randomUUID()
+  const payload: TransactionPayload = {
+    type: existing.type,
+    wallet_id: existing.walletId,
+    destination_wallet_id: existing.destinationWalletId ?? null,
+    category_id: existing.categoryId,
+    amount_minor: existing.amountMinor,
+    transaction_date: existing.transactionDate,
+    note: existing.note,
+    items: existing.items?.map((item) => ({ name: item.name, quantity: item.quantity, unit_price_minor: item.unitPriceMinor })) ?? null,
+  }
+  const envelope = { operation_id: operationId, device_id: deviceId(), entity_type: 'transactions', entity_id: existing.id, action: 'delete', base_version: existing.version, payload }
+  const deleted: Transaction = { ...existing, deletedAt: new Date().toISOString(), localStatus: 'pending', lastError: undefined }
+  const operation: PendingOperation = { operationId, userId, deviceId: envelope.device_id, entityId: existing.id, payload, frozenEnvelope: envelope, status: 'pending' }
+  const database = await openDatabase()
+  const transaction = database.transaction([transactionStore, operationStore], 'readwrite')
+  transaction.objectStore(transactionStore).put(deleted)
+  transaction.objectStore(operationStore).put(operation)
+  await transactionComplete(transaction)
+  database.close()
+  return deleted
+}
+
+export { decimalAmountFromMinor }
 
 export async function saveBudgetAndOperation(userId: string, input: { categoryId: string; limit: string; month: string }): Promise<Budget> {
   if (!/^\d{4}-\d{2}$/.test(input.month)) throw new Error('Choose a valid budget month.')

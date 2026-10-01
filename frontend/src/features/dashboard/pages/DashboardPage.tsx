@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import WalletsPage from '../../wallets/pages/WalletsPage'
 import HomeDashboard from '../components/HomeDashboard'
 import {
@@ -9,19 +9,23 @@ import {
 } from '../../wallets/lib/walletSync'
 import { calculateMonthlySummary, currentLocalMonth, transactionsForMonth } from '../lib/monthlySummary'
 import { expenseTotalsByCategory, incomeExpenseByMonth } from '../lib/chartData'
+import { activeWalletRecords } from '../../wallets/lib/walletVisibility'
 import ProfileSettingsPage from '../../profile/pages/ProfileSettingsPage'
 import AccountMenu from '../../auth/components/AccountMenu'
 import AppIcon from '../../../components/AppIcon'
+import BrandLogo from '../../../components/BrandLogo'
+import '../../transactions/components/TransactionForm.css'
 
 export type DashboardView = 'home' | 'wallets' | 'transactions' | 'more' | 'data-only'
 
 type DashboardPageProps = {
   userId: string
+  registrationNotice?: boolean
   onViewChange: (view: DashboardView) => void
   onLogout: () => void
 }
 
-export default function DashboardPage({ userId, onViewChange, onLogout }: DashboardPageProps) {
+export default function DashboardPage({ userId, registrationNotice = false, onViewChange, onLogout }: DashboardPageProps) {
   const [view, setView] = useState<DashboardView>('home')
   const [wallets, setWallets] = useState<Wallet[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -29,7 +33,15 @@ export default function DashboardPage({ userId, onViewChange, onLogout }: Dashbo
   const [selectedMonth, setSelectedMonth] = useState(() => currentLocalMonth())
   const [transactionType, setTransactionType] = useState<'income' | 'expense' | 'transfer'>('expense')
   const [transactionMode, setTransactionMode] = useState<'history' | 'create'>('history')
+  const [transactionNotice, setTransactionNotice] = useState<{ id: string; title: string; detail: string } | null>(null)
   const [settingsPage, setSettingsPage] = useState<'menu' | 'profile' | 'categories' | 'budgets'>('menu')
+  const transactionNoticeId = transactionNotice?.id
+
+  useEffect(() => {
+    if (!transactionNoticeId) return
+    const timeout = window.setTimeout(() => setTransactionNotice(null), 5000)
+    return () => window.clearTimeout(timeout)
+  }, [transactionNoticeId])
 
   const changeView = useCallback((nextView: DashboardView) => {
     setView(nextView)
@@ -40,12 +52,47 @@ export default function DashboardPage({ userId, onViewChange, onLogout }: Dashbo
   }, [onViewChange])
 
   function openTransactionForm(type: 'income' | 'expense' | 'transfer') {
+    setTransactionNotice(null)
     setTransactionType(type)
     changeView('transactions')
     setTransactionMode('create')
   }
 
-  const activeWallets = wallets.filter((wallet) => wallet.deletedAt == null)
+  function closeTransactionForm(): void {
+    setTransactionMode('history')
+    window.scrollTo(0, 0)
+  }
+
+  function handleTransactionSaved(type: 'income' | 'expense' | 'transfer', transactionId: string, updated = false): void {
+    setTransactionMode('history')
+    setTransactionNotice({
+      id: transactionId,
+      title: updated ? 'Transaction updated successfully.' : type === 'transfer' ? 'Transfer saved' : `${type === 'income' ? 'Income' : 'Expense'} saved`,
+      detail: 'Waiting to sync',
+    })
+    window.scrollTo(0, 0)
+  }
+
+  function handleTransactionDeleted(transactionId: string, offline: boolean): void {
+    setTransactionMode('history')
+    setTransactionNotice({
+      id: transactionId,
+      title: offline ? 'Transaction deleted on this device. Waiting to sync.' : 'Transaction deleted.',
+      detail: 'Waiting to sync',
+    })
+    window.scrollTo(0, 0)
+  }
+
+  function handleTransactionSyncState(transactionId: string, state: 'waiting' | 'synced' | 'error'): void {
+    setTransactionNotice((notice) => notice?.id === transactionId
+      ? { ...notice, detail: state === 'synced' ? 'Synced' : state === 'error' ? 'Needs attention' : 'Waiting to sync' }
+      : notice)
+  }
+
+  const transactionFormOpen = view === 'transactions' && transactionMode === 'create'
+  const visibleTransactionNotice = view === 'transactions' && !transactionFormOpen ? transactionNotice : null
+
+  const activeWallets = activeWalletRecords(wallets)
   const totalBalance = activeWallets
     .reduce((total, wallet) => total + BigInt(calculateWalletBalance(wallet, transactions)), 0n)
     .toString()
@@ -58,13 +105,26 @@ export default function DashboardPage({ userId, onViewChange, onLogout }: Dashbo
   const sixMonthComparison = incomeExpenseByMonth(transactions, selectedMonth)
 
   return (
-    <div className={view === 'home' ? 'app-shell home-shell' : 'app-shell'}>
-      <header className="app-header">
-        <div className="brand-lockup"><span className="brand-logo" aria-hidden="true"><AppIcon name="brand" /></span><p className="app-name">Money Tracker</p></div>
+    <div className={`app-shell${view === 'home' ? ' home-shell' : ''}${transactionFormOpen ? ' transaction-form-open' : ''}`}>
+      <header className={`app-header${transactionFormOpen ? ' app-header-form' : ''}`}>
+        {transactionFormOpen && <button type="button" className="app-header-back" aria-label="Back to Transactions" onClick={closeTransactionForm}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg></button>}
+        <div className="brand-lockup"><BrandLogo /><p className="app-name">Money Tracker</p></div>
         <div className="header-actions">
           <AccountMenu userId={userId} onOpenProfile={() => changeView('more')} onLogout={onLogout} />
         </div>
       </header>
+
+      <div className={registrationNotice ? 'account-created-notice app-content' : 'sr-only'} role="status" aria-live="polite" aria-atomic="true">
+        {registrationNotice && 'Account created successfully.'}
+      </div>
+
+      <div className={visibleTransactionNotice ? 'transaction-save-notice' : 'sr-only'}>
+        {visibleTransactionNotice && <span className="transaction-notice-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></svg></span>}
+        <div className="transaction-notice-copy" role="status" aria-live="polite" aria-atomic="true">
+          {visibleTransactionNotice && <><strong>{visibleTransactionNotice.title}</strong><span>{visibleTransactionNotice.detail}</span></>}
+        </div>
+        {visibleTransactionNotice && <button type="button" className="transaction-notice-dismiss" aria-label="Dismiss save notification" onClick={() => setTransactionNotice(null)}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg></button>}
+      </div>
 
       <main className="app-content">
         {view === 'home' && <HomeDashboard
@@ -91,7 +151,10 @@ export default function DashboardPage({ userId, onViewChange, onLogout }: Dashbo
             initialHistoryMonth={selectedMonth}
             selectedMonth={selectedMonth}
             onSelectedMonthChange={setSelectedMonth}
-            onCancelTransaction={() => changeView('home')}
+            onCancelTransaction={closeTransactionForm}
+            onTransactionSaved={handleTransactionSaved}
+            onTransactionDeleted={handleTransactionDeleted}
+            onTransactionSyncState={handleTransactionSyncState}
             moreSection={settingsPage === 'budgets' ? 'budgets' : 'categories'}
             onWalletsChange={setWallets}
             onCategoriesChange={setCategories}
@@ -113,7 +176,7 @@ export default function DashboardPage({ userId, onViewChange, onLogout }: Dashbo
         )}
       </main>
 
-      {view !== 'data-only' && (
+      {view !== 'data-only' && !transactionFormOpen && (
         <nav className="bottom-nav" aria-label="Main navigation">
           <button type="button" aria-current={view === 'home' ? 'page' : undefined} className={view === 'home' ? 'nav-item nav-item-active' : 'nav-item'} onClick={() => changeView('home')}>
             <AppIcon name="home" />Home

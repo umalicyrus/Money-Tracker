@@ -1,6 +1,6 @@
 import type { SVGProps } from 'react'
 
-type IconName = 'home' | 'wallet' | 'wallets' | 'brand' | 'transactions' | 'more' | 'bank' | 'savings' | 'card' | 'eye' | 'eye-off' | 'plus' | 'edit' | 'more-vertical'
+type IconName = 'home' | 'wallet' | 'wallets' | 'brand' | 'transactions' | 'more' | 'bank' | 'savings' | 'card' | 'eye' | 'eye-off' | 'plus' | 'edit' | 'trash' | 'more-vertical' | 'person' | 'mail' | 'lock' | 'arrow-right'
 export default function AppIcon({ name, ...props }: SVGProps<SVGSVGElement> & { name: IconName }) {
   const wallet = <><path d="M4 7V5a2 2 0 0 1 1.6-2L17 1.5V7M20 12V9a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-3" /><path d="M21 12h-5a2 2 0 0 0 0 4h5zM17 14h.01" /></>
   const paths = {
@@ -15,7 +15,12 @@ export default function AppIcon({ name, ...props }: SVGProps<SVGSVGElement> & { 
     'eye-off': <><path d="m3 3 18 18M10 5h2c6 0 10 7 10 7a23 23 0 0 1-3 4M6 6a25 25 0 0 0-4 6s4 7 10 7c2 0 4-.7 5-1.5M10 10a3 3 0 0 0 4 4" /></>,
     plus: <path d="M12 5v14M5 12h14" />,
     edit: <><path d="m15 4 5 5M4 20l5-1L21 7a2 2 0 0 0-4-4L5 15z" /></>,
+    trash: <><path d="M4 7h16M10 4h4m-8 3 1 14h10l1-14M10 11v6m4-6v6" /></>,
     'more-vertical': <><circle cx="12" cy="5" r=".8" /><circle cx="12" cy="12" r=".8" /><circle cx="12" cy="19" r=".8" /></>,
+    person: <><circle cx="12" cy="7" r="4" /><path d="M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2" /></>,
+    mail: <><rect x="2" y="4" width="20" height="16" rx="2" /><path d="m3 6 9 7 9-7" /></>,
+    lock: <><rect x="4" y="10" width="16" height="12" rx="2" /><path d="M7 10V7a5 5 0 0 1 10 0v3" /></>,
+    'arrow-right': <path d="M4 12h16m-7-7 7 7-7 7" />,
   }
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{paths[name]}</svg>
 }

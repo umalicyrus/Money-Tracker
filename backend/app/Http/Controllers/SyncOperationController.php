@@ -74,11 +74,27 @@ class SyncOperationController extends Controller
                 }
 
                 if ($operation['entity_type'] === 'transactions') {
+                    if ($operation['action'] === 'delete') {
+                        return $this->deleteTransaction($operation, $requestHash, $user->getKey(), $head, $now);
+                    }
+
+                    if ($operation['action'] === 'update') {
+                        return $this->updateTransaction($operation, $requestHash, $user->getKey(), $head, $now);
+                    }
+
+                    if ($operation['action'] !== 'create') {
+                        return $this->errorResponse('VALIDATION_FAILED', 'Transactions support create and update operations only.', 422);
+                    }
+
                     return $this->createTransaction($operation, $requestHash, $user->getKey(), $head, $now);
                 }
 
                 if ($operation['entity_type'] === 'categories') {
                     if ($operation['action'] !== 'create') {
+                        if (! in_array($operation['action'], ['update', 'archive'], true)) {
+                            return $this->errorResponse('VALIDATION_FAILED', 'Categories support create, update, and archive operations only.', 422);
+                        }
+
                         return $this->updateCategory($operation, $requestHash, $user->getKey(), $head, $name, $now);
                     }
 
@@ -86,6 +102,10 @@ class SyncOperationController extends Controller
                 }
 
                 if ($operation['entity_type'] === 'budgets') {
+                    if ($operation['action'] !== 'create') {
+                        return $this->errorResponse('VALIDATION_FAILED', 'Budgets support create operations only.', 422);
+                    }
+
                     return $this->createBudget($operation, $requestHash, $user->getKey(), $head, $now);
                 }
 
@@ -93,6 +113,18 @@ class SyncOperationController extends Controller
                     return $this->errorResponse('VALIDATION_FAILED', 'Please correct the highlighted fields.', 422, [
                         'payload.type' => ['Choose cash, bank, or ewallet for a wallet.'],
                     ]);
+                }
+
+                if ($operation['action'] === 'update') {
+                    return $this->updateWallet($operation, $requestHash, $user->getKey(), $head, $name, $openingBalance, $now);
+                }
+
+                if ($operation['action'] === 'delete') {
+                    return $this->archiveWallet($operation, $requestHash, $user->getKey(), $head, $now);
+                }
+
+                if ($operation['action'] !== 'create') {
+                    return $this->errorResponse('VALIDATION_FAILED', 'Wallets support create and update operations only.', 422);
                 }
 
                 $nameKey = mb_strtolower($name, 'UTF-8');
@@ -314,6 +346,207 @@ class SyncOperationController extends Controller
             'last_sequence' => $sequence,
             'updated_at' => $now,
         ]);
+
+        return response()->json($result);
+    }
+
+    /**
+     * @param  array<string, mixed>  $operation
+     */
+    private function updateTransaction(array $operation, string $requestHash, string $userId, object $head, \DateTimeInterface $now): JsonResponse
+    {
+        $payload = $operation['payload'];
+        $transaction = DB::table('transactions')->where('user_id', $userId)->where('id', $operation['entity_id'])->lockForUpdate()->first();
+        if ($transaction === null || $transaction->deleted_at !== null) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'This transaction is unavailable.', 409);
+        }
+        if ((string) $transaction->version !== $operation['base_version']) {
+            return $this->errorResponse('VERSION_CONFLICT', 'This record changed on another device. Review before retrying.', 409);
+        }
+
+        $items = $payload['items'] ?? null;
+        if ($items !== null && $payload['type'] !== 'expense') {
+            return $this->errorResponse('VALIDATION_FAILED', 'Only expenses may include item details.', 422);
+        }
+        if ($items !== null && $this->itemsTotal($items) !== $payload['amount_minor']) {
+            return $this->errorResponse('VALIDATION_FAILED', 'Item totals must equal the expense total.', 422, [
+                'payload.amount_minor' => ['Item totals must equal the expense total.'],
+            ]);
+        }
+        if (! $this->transactionReferencesAreAvailable($payload, $userId)) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'The selected wallet or category is unavailable.', 409);
+        }
+        if ($payload['type'] === 'transfer' && $payload['wallet_id'] === $payload['destination_wallet_id']) {
+            return $this->errorResponse('VALIDATION_FAILED', 'Choose two different wallets for a transfer.', 422, [
+                'payload.destination_wallet_id' => ['Choose a destination wallet different from the source wallet.'],
+            ]);
+        }
+
+        $version = (int) $transaction->version + 1;
+        $updated = [
+            'version' => $version,
+            'type' => $payload['type'],
+            'wallet_id' => $payload['wallet_id'],
+            'destination_wallet_id' => $payload['type'] === 'transfer' ? $payload['destination_wallet_id'] : null,
+            'category_id' => $payload['type'] === 'transfer' ? null : $payload['category_id'],
+            'amount_minor' => $payload['amount_minor'],
+            'transaction_date' => $payload['transaction_date'],
+            'note' => $payload['note'] ?? null,
+            'items' => $items === null ? null : json_encode($items, JSON_THROW_ON_ERROR),
+            'updated_at' => $now,
+        ];
+        DB::table('transactions')->where('id', $transaction->id)->update($updated);
+        $record = [
+            'id' => (string) $transaction->id, 'user_id' => $userId, 'version' => (string) $version,
+            'type' => $updated['type'], 'wallet_id' => $updated['wallet_id'], 'destination_wallet_id' => $updated['destination_wallet_id'],
+            'category_id' => $updated['category_id'], 'amount_minor' => (string) $updated['amount_minor'],
+            'transaction_date' => $updated['transaction_date'], 'note' => $updated['note'], 'items' => $items,
+            'created_at' => $transaction->created_at, 'updated_at' => $now->format('Y-m-d\\TH:i:s.u\\Z'), 'deleted_at' => null,
+        ];
+
+        return $this->storeUpdateResult($operation, $requestHash, $userId, $head, $now, 'transactions', $record, $version);
+    }
+
+    /**
+     * @param  array<string, mixed>  $operation
+     */
+    private function updateWallet(array $operation, string $requestHash, string $userId, object $head, string $name, string $openingBalance, \DateTimeInterface $now): JsonResponse
+    {
+        $wallet = DB::table('wallets')->where('user_id', $userId)->where('id', $operation['entity_id'])->lockForUpdate()->first();
+        if ($wallet === null || $wallet->deleted_at !== null) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'This wallet is unavailable.', 409);
+        }
+        if ((string) $wallet->version !== $operation['base_version']) {
+            return $this->errorResponse('VERSION_CONFLICT', 'This record changed on another device. Review before retrying.', 409);
+        }
+        if ((bool) $wallet->is_archived) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'Archived wallets cannot be edited.', 409);
+        }
+
+        $nameKey = mb_strtolower($name, 'UTF-8');
+        if (DB::table('wallets')->where('user_id', $userId)->where('name_key', $nameKey)->where('id', '!=', $wallet->id)->exists()) {
+            return $this->errorResponse('DUPLICATE_NAME', 'A wallet with this name already exists.', 409);
+        }
+
+        $version = (int) $wallet->version + 1;
+        $updated = [
+            'version' => $version, 'name' => $name, 'name_key' => $nameKey, 'type' => $operation['payload']['type'],
+            'currency' => $operation['payload']['currency'] ?? $wallet->currency,
+            'opening_balance_minor' => $openingBalance, 'opening_date' => $operation['payload']['opening_date'], 'updated_at' => $now,
+        ];
+        DB::table('wallets')->where('id', $wallet->id)->update($updated);
+        $record = [
+            'id' => (string) $wallet->id, 'user_id' => $userId, 'version' => (string) $version,
+            'name' => $updated['name'], 'type' => $updated['type'], 'currency' => $updated['currency'],
+            'opening_balance_minor' => (string) $updated['opening_balance_minor'], 'opening_date' => $updated['opening_date'],
+            'is_archived' => false, 'created_at' => $wallet->created_at, 'updated_at' => $now->format('Y-m-d\\TH:i:s.u\\Z'), 'deleted_at' => null,
+        ];
+
+        return $this->storeUpdateResult($operation, $requestHash, $userId, $head, $now, 'wallets', $record, $version);
+    }
+
+    /**
+     * @param  array<string, mixed>  $operation
+     */
+    private function deleteTransaction(array $operation, string $requestHash, string $userId, object $head, \DateTimeInterface $now): JsonResponse
+    {
+        $transaction = DB::table('transactions')->where('user_id', $userId)->where('id', $operation['entity_id'])->lockForUpdate()->first();
+        if ($transaction === null || $transaction->deleted_at !== null) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'This transaction is unavailable.', 409);
+        }
+        if ((string) $transaction->version !== $operation['base_version']) {
+            return $this->errorResponse('VERSION_CONFLICT', 'This record changed on another device. Review before retrying.', 409);
+        }
+
+        $version = (int) $transaction->version + 1;
+        DB::table('transactions')->where('id', $transaction->id)->update([
+            'version' => $version,
+            'deleted_at' => $now,
+            'updated_at' => $now,
+        ]);
+        $record = [
+            'id' => (string) $transaction->id, 'user_id' => $userId, 'version' => (string) $version,
+            'type' => $transaction->type, 'wallet_id' => (string) $transaction->wallet_id,
+            'destination_wallet_id' => $transaction->destination_wallet_id === null ? null : (string) $transaction->destination_wallet_id,
+            'category_id' => $transaction->category_id === null ? null : (string) $transaction->category_id,
+            'amount_minor' => (string) $transaction->amount_minor, 'transaction_date' => $transaction->transaction_date,
+            'note' => $transaction->note,
+            'items' => $transaction->items === null ? null : json_decode($transaction->items, true, 512, JSON_THROW_ON_ERROR),
+            'created_at' => $transaction->created_at, 'updated_at' => $now->format('Y-m-d\\TH:i:s.u\\Z'),
+            'deleted_at' => $now->format('Y-m-d\\TH:i:s.u\\Z'),
+        ];
+
+        return $this->storeUpdateResult($operation, $requestHash, $userId, $head, $now, 'transactions', $record, $version, 'delete');
+    }
+
+    /**
+     * @param  array<string, mixed>  $operation
+     */
+    private function archiveWallet(array $operation, string $requestHash, string $userId, object $head, \DateTimeInterface $now): JsonResponse
+    {
+        $wallet = DB::table('wallets')->where('user_id', $userId)->where('id', $operation['entity_id'])->lockForUpdate()->first();
+        if ($wallet === null || $wallet->deleted_at !== null || (bool) $wallet->is_archived) {
+            return $this->errorResponse('REFERENCE_UNAVAILABLE', 'This wallet is unavailable.', 409);
+        }
+        if ((string) $wallet->version !== $operation['base_version']) {
+            return $this->errorResponse('VERSION_CONFLICT', 'This record changed on another device. Review before retrying.', 409);
+        }
+
+        $version = (int) $wallet->version + 1;
+        DB::table('wallets')->where('id', $wallet->id)->update([
+            'version' => $version,
+            'is_archived' => true,
+            'updated_at' => $now,
+        ]);
+        $record = [
+            'id' => (string) $wallet->id, 'user_id' => $userId, 'version' => (string) $version,
+            'name' => $wallet->name, 'type' => $wallet->type, 'currency' => $wallet->currency,
+            'opening_balance_minor' => (string) $wallet->opening_balance_minor, 'opening_date' => $wallet->opening_date,
+            'is_archived' => true, 'created_at' => $wallet->created_at,
+            'updated_at' => $now->format('Y-m-d\\TH:i:s.u\\Z'), 'deleted_at' => null,
+        ];
+
+        return $this->storeUpdateResult($operation, $requestHash, $userId, $head, $now, 'wallets', $record, $version);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function transactionReferencesAreAvailable(array $payload, string $userId): bool
+    {
+        $wallet = DB::table('wallets')->where('user_id', $userId)->where('id', $payload['wallet_id'])->where('is_archived', false)->whereNull('deleted_at')->exists();
+        if (! $wallet) {
+            return false;
+        }
+        if ($payload['type'] === 'transfer') {
+            return DB::table('wallets')->where('user_id', $userId)->where('id', $payload['destination_wallet_id'])->where('is_archived', false)->whereNull('deleted_at')->exists();
+        }
+
+        return DB::table('categories')->where('user_id', $userId)->where('id', $payload['category_id'])->where('type', $payload['type'])->where('is_archived', false)->whereNull('deleted_at')->exists();
+    }
+
+    /**
+     * @param  array<string, mixed>  $operation
+     * @param  array<string, mixed>  $record
+     */
+    private function storeUpdateResult(array $operation, string $requestHash, string $userId, object $head, \DateTimeInterface $now, string $entityType, array $record, int $version, string $changeAction = 'upsert'): JsonResponse
+    {
+        $sequence = (int) $head->last_sequence + 1;
+        $result = ['data' => [
+            'user_id' => $userId, 'operation_id' => $operation['operation_id'], 'entity_type' => $entityType,
+            'entity_id' => $operation['entity_id'], 'version' => (string) $version, 'sequence' => (string) $sequence, 'record' => $record,
+        ]];
+        DB::table('sync_changes')->insert([
+            'user_id' => $userId, 'sequence' => $sequence, 'entity_type' => $entityType, 'entity_id' => $operation['entity_id'],
+            'entity_version' => $version, 'action' => $changeAction, 'payload' => json_encode($record, JSON_THROW_ON_ERROR),
+            'operation_id' => $operation['operation_id'], 'created_at' => $now,
+        ]);
+        DB::table('sync_operations')->insert([
+            'user_id' => $userId, 'operation_id' => $operation['operation_id'], 'device_id' => $operation['device_id'],
+            'entity_type' => $entityType, 'entity_id' => $operation['entity_id'], 'request_hash' => $requestHash,
+            'result' => json_encode($result, JSON_THROW_ON_ERROR), 'applied_at' => $now,
+        ]);
+        DB::table('sync_heads')->where('user_id', $userId)->update(['last_sequence' => $sequence, 'updated_at' => $now]);
 
         return response()->json($result);
     }

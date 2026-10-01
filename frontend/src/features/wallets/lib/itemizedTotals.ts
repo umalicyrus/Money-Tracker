@@ -18,3 +18,10 @@ export function itemizedTransactionItems(items: ItemInput[]): TransactionItem[] 
 export function itemizedTotalMinor(items: ItemInput[]): string {
   return itemizedTransactionItems(items).reduce((total, item) => total + BigInt(item.lineTotalMinor), 0n).toString()
 }
+
+export function requireMatchingItemSubtotal(amountMinor: string, items: TransactionItem[]): void {
+  const subtotal = items.reduce((total, item) => total + BigInt(item.lineTotalMinor), 0n)
+  if (BigInt(amountMinor) !== subtotal) {
+    throw new Error('Expense amount and items subtotal must match. Update the amount or item details before saving.')
+  }
+}

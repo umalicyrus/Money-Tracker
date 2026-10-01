@@ -22,3 +22,12 @@ test('pending records are protected from a downloaded server replacement', () =>
     false,
   )
 })
+
+test('a conflicted local edit is retained while the server version is newer', () => {
+  const recordId = 'edited-transaction'
+
+  assert.equal(
+    keepsLocalRecord({ version: '1', localStatus: 'error' }, '2', new Set([recordId]), recordId),
+    true,
+  )
+})

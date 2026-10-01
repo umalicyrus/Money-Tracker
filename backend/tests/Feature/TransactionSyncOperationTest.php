@@ -66,6 +66,90 @@ class TransactionSyncOperationTest extends TestCase
         $this->assertDatabaseCount('transactions', 1);
     }
 
+    public function test_transaction_update_keeps_the_uuid_uses_the_current_version_and_is_idempotent(): void
+    {
+        $user = User::factory()->create();
+        [$walletId, $categoryId] = $this->createReferences($user);
+        $create = $this->operation($walletId, $categoryId);
+        $this->postOperation($user, $create)->assertOk();
+        $update = $create;
+        $update['operation_id'] = (string) Str::uuid();
+        $update['action'] = 'update';
+        $update['base_version'] = '1';
+        $update['payload']['amount_minor'] = '4500';
+        $update['payload']['note'] = 'Edited lunch';
+
+        $first = $this->postOperation($user, $update)->assertOk()->json();
+        $second = $this->postOperation($user, $update)->assertOk()->json();
+
+        $this->assertSame($first, $second);
+        $this->assertDatabaseHas('transactions', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 2, 'amount_minor' => '4500', 'note' => 'Edited lunch']);
+        $this->assertDatabaseCount('transactions', 1);
+        $this->assertDatabaseCount('sync_operations', 2);
+    }
+
+    public function test_another_user_cannot_update_a_transaction(): void
+    {
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        [$walletId, $categoryId] = $this->createReferences($user);
+        $create = $this->operation($walletId, $categoryId);
+        $this->postOperation($user, $create)->assertOk();
+        $update = $create;
+        $update['operation_id'] = (string) Str::uuid();
+        $update['action'] = 'update';
+        $update['base_version'] = '1';
+
+        $this->actingAs($otherUser, 'sanctum')->withHeaders(['X-Expected-User-ID' => $otherUser->id, 'X-Sync-Protocol' => '1'])
+            ->postJson('/api/v1/sync/operations', $update)->assertConflict()->assertJsonPath('error.code', 'REFERENCE_UNAVAILABLE');
+        $this->assertDatabaseHas('transactions', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 1]);
+    }
+
+    public function test_transaction_delete_creates_one_idempotent_tombstone(): void
+    {
+        $user = User::factory()->create();
+        [$walletId, $categoryId] = $this->createReferences($user);
+        $create = $this->operation($walletId, $categoryId);
+        $this->postOperation($user, $create)->assertOk();
+        $delete = $create;
+        $delete['operation_id'] = (string) Str::uuid();
+        $delete['action'] = 'delete';
+        $delete['base_version'] = '1';
+
+        $first = $this->postOperation($user, $delete)->assertOk()->json();
+        $second = $this->postOperation($user, $delete)->assertOk()->json();
+
+        $this->assertSame($first, $second);
+        $this->assertNotNull($first['data']['record']['deleted_at']);
+        $this->assertDatabaseHas('transactions', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 2]);
+        $this->assertNotNull(\DB::table('transactions')->where('id', $create['entity_id'])->value('deleted_at'));
+        $this->assertDatabaseCount('transactions', 1);
+        $this->assertDatabaseCount('sync_operations', 2);
+        $this->assertDatabaseCount('sync_changes', 2);
+        $this->assertDatabaseHas('sync_changes', ['entity_id' => $create['entity_id'], 'entity_version' => 2, 'action' => 'delete', 'operation_id' => $delete['operation_id']]);
+    }
+
+    public function test_transaction_delete_rejects_another_user_and_a_stale_version(): void
+    {
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        [$walletId, $categoryId] = $this->createReferences($user);
+        $create = $this->operation($walletId, $categoryId);
+        $this->postOperation($user, $create)->assertOk();
+        $delete = $create;
+        $delete['operation_id'] = (string) Str::uuid();
+        $delete['action'] = 'delete';
+        $delete['base_version'] = '1';
+
+        $this->postOperation($otherUser, $delete)->assertConflict()->assertJsonPath('error.code', 'REFERENCE_UNAVAILABLE');
+        $delete['operation_id'] = (string) Str::uuid();
+        $delete['base_version'] = '9';
+        $this->postOperation($user, $delete)->assertConflict()->assertJsonPath('error.code', 'VERSION_CONFLICT');
+
+        $this->assertNull(\DB::table('transactions')->where('id', $create['entity_id'])->value('deleted_at'));
+        $this->assertDatabaseHas('transactions', ['id' => $create['entity_id'], 'version' => 1]);
+    }
+
     /** @return array{0: string, 1: string} */
     private function createReferences(User $user, string $categoryType = 'expense'): array
     {

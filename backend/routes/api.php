@@ -7,7 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/user', function (Request $request) {
-    return $request->user();
+    return response()->json($request->user())->header('Cache-Control', 'no-store, private');
 })->middleware('auth:sanctum');
 
 Route::post('/v1/sync/operations', [SyncOperationController::class, 'store'])

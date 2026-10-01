@@ -10,9 +10,10 @@ function pwaServiceWorker(): Plugin {
       const buildAssets = Object.keys(bundle)
         .filter((fileName) => !fileName.endsWith('.map'))
         .map((fileName) => `/${fileName}`)
-      const precache = ['/', '/favicon.svg', '/icons.svg', '/app-icon.svg', '/manifest.webmanifest', ...buildAssets]
+      const publicAssets = ['/favicon.png', '/apple-touch-icon.png', '/app-icon-192.png', '/app-icon-512.png', '/icons.svg', '/manifest.webmanifest']
+      const precache = ['/', ...publicAssets, ...buildAssets]
       const revision = createHash('sha256').update(JSON.stringify(precache))
-      for (const file of ['index.html', 'public/favicon.svg', 'public/icons.svg', 'public/app-icon.svg', 'public/manifest.webmanifest']) {
+      for (const file of ['index.html', ...publicAssets.map((path) => `public${path}`)]) {
         revision.update(readFileSync(new URL(file, import.meta.url)))
       }
       const cacheName = `money-tracker-shell-v4-${revision.digest('hex').slice(0, 20)}`
@@ -23,7 +24,7 @@ function pwaServiceWorker(): Plugin {
         source: `const CACHE_NAME = ${JSON.stringify(cacheName)}
 const PRECACHE_URLS = ${JSON.stringify(precache)}
 const CACHE_PREFIX = 'money-tracker-shell-'
-const API_PREFIXES = ['/api', '/sanctum', '/login', '/logout', '/up', '/storage']
+const API_PREFIXES = ['/api', '/sanctum', '/login', '/register', '/logout', '/up', '/storage']
 
 function isProtectedRequest(url) {
   return API_PREFIXES.some((prefix) =>
@@ -95,6 +96,7 @@ export default defineConfig({
       '/api': 'http://127.0.0.1:8000',
       '/sanctum': 'http://127.0.0.1:8000',
       '/login': 'http://127.0.0.1:8000',
+      '/register': 'http://127.0.0.1:8000',
       '/logout': 'http://127.0.0.1:8000',
     },
   },
@@ -106,6 +108,7 @@ export default defineConfig({
       '/api': 'http://127.0.0.1:8000',
       '/sanctum': 'http://127.0.0.1:8000',
       '/login': 'http://127.0.0.1:8000',
+      '/register': 'http://127.0.0.1:8000',
       '/logout': 'http://127.0.0.1:8000',
     },
   },

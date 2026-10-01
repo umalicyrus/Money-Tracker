@@ -54,7 +54,7 @@ export default function HomeDashboard({ totalBalance, selectedMonth, onMonthChan
     <section className="home-section" aria-labelledby="home-monthly-heading">
       <div className="home-section-heading"><h2 id="home-monthly-heading">Monthly overview</h2><div className="home-month-control">
         <button type="button" aria-label="Previous month" onClick={() => shiftMonth(-1)}><Chevron /></button>
-        <label><span>{monthLabel(selectedMonth)}</span><input aria-label="Overview month" type="month" value={selectedMonth} min="0001-01" max="9999-12" onChange={event => { if (/^\d{4}-\d{2}$/.test(event.target.value)) onMonthChange(event.target.value) }} /></label>
+        <label><span>{monthLabel(selectedMonth, true)}</span><input aria-label="Overview month" type="month" value={selectedMonth} min="0001-01" max="9999-12" onChange={event => { if (/^\d{4}-\d{2}$/.test(event.target.value)) onMonthChange(event.target.value) }} /></label>
         <button type="button" aria-label="Next month" onClick={() => shiftMonth(1)}><Chevron next /></button>
       </div></div>
       <div className="home-summary" aria-live="polite">

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { filteredTransactions, groupTransactionsByDay } from './dailyTransactions.ts'
+import { filteredTransactions, groupTransactionsByDay, initialOpenTransactionDate, retainOpenTransactionDate, toggleOpenTransactionDate } from './dailyTransactions.ts'
 import type { Transaction } from '../../wallets/lib/walletSync.ts'
 
 const transaction = (id: string, type: Transaction['type'], amountMinor: string, transactionDate: string): Transaction => ({ id, userId: 'user', version: '1', type, amountMinor, transactionDate, walletId: 'wallet', categoryId: 'category', note: null, localStatus: 'synced' })
@@ -17,4 +17,36 @@ test('filters daily groups by transaction type without changing stored transacti
   assert.equal(days[0].incomeMinor, '0')
   assert.deepEqual(days[0].transactions.map((item) => item.id), ['expense'])
   assert.equal(source.length, 2)
+})
+
+test('keeps historical transactions readable when their wallet is archived', () => {
+  const historical = transaction('history', 'expense', '1200', '2026-09-15')
+  historical.walletId = 'archived-wallet'
+
+  assert.deepEqual(filteredTransactions([historical], 'all', '2026-09').map((item) => item.id), ['history'])
+})
+
+test('today opens by default and previous dates remain closed', () => {
+  const dates = ['2026-10-01', '2026-09-30', '2026-09-29']
+  const openDate = initialOpenTransactionDate(dates, '2026-10-01')
+  assert.equal(openDate, '2026-10-01')
+  assert.equal(dates.filter((date) => date === openDate).length, 1)
+  assert.notEqual(openDate, '2026-09-30')
+})
+
+test('opening another date closes the previously open date', () => {
+  assert.equal(toggleOpenTransactionDate('2026-10-01', '2026-09-30'), '2026-09-30')
+})
+
+test('clicking the open date closes it', () => {
+  assert.equal(toggleOpenTransactionDate('2026-09-30', '2026-09-30'), null)
+})
+
+test('a previous month starts with all date groups closed', () => {
+  assert.equal(initialOpenTransactionDate(['2026-09-30', '2026-09-29'], '2026-10-01'), null)
+})
+
+test('a filter keeps the open date only while it has matching transactions', () => {
+  assert.equal(retainOpenTransactionDate('2026-10-01', ['2026-10-01']), '2026-10-01')
+  assert.equal(retainOpenTransactionDate('2026-10-01', ['2026-09-30']), null)
 })

@@ -130,6 +130,83 @@ class WalletSyncOperationTest extends TestCase
         ]);
     }
 
+    public function test_wallet_update_keeps_the_uuid_uses_the_current_version_and_is_idempotent(): void
+    {
+        $user = User::factory()->create();
+        $create = $this->operation();
+        $this->postOperation($user, $create)->assertOk();
+        $update = $create;
+        $update['operation_id'] = (string) Str::uuid();
+        $update['action'] = 'update';
+        $update['base_version'] = '1';
+        $update['payload']['name'] = 'Edited Cash';
+        $update['payload']['opening_balance_minor'] = '250000';
+
+        $first = $this->postOperation($user, $update)->assertOk()->json();
+        $second = $this->postOperation($user, $update)->assertOk()->json();
+
+        $this->assertSame($first, $second);
+        $this->assertDatabaseHas('wallets', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 2, 'name' => 'Edited Cash', 'opening_balance_minor' => '250000']);
+        $this->assertDatabaseCount('wallets', 1);
+        $this->assertDatabaseCount('sync_operations', 2);
+    }
+
+    public function test_wallet_update_rejects_a_stale_version_without_changing_the_wallet(): void
+    {
+        $user = User::factory()->create();
+        $create = $this->operation();
+        $this->postOperation($user, $create)->assertOk();
+        $update = $create;
+        $update['operation_id'] = (string) Str::uuid();
+        $update['action'] = 'update';
+        $update['base_version'] = '9';
+
+        $this->postOperation($user, $update)->assertConflict()->assertJsonPath('error.code', 'VERSION_CONFLICT');
+        $this->assertDatabaseHas('wallets', ['id' => $create['entity_id'], 'version' => 1, 'name' => 'Main Cash']);
+    }
+
+    public function test_wallet_archive_is_idempotent_and_preserves_historical_transactions(): void
+    {
+        $user = User::factory()->create();
+        $create = $this->operation();
+        $this->postOperation($user, $create)->assertOk();
+        $categoryId = (string) Str::uuid();
+        $transactionId = (string) Str::uuid();
+        \DB::table('categories')->insert(['id' => $categoryId, 'user_id' => $user->id, 'version' => 1, 'name' => 'Food', 'name_key' => 'food', 'type' => 'expense', 'icon' => 'food', 'is_archived' => false, 'created_at' => now(), 'updated_at' => now()]);
+        \DB::table('transactions')->insert(['id' => $transactionId, 'user_id' => $user->id, 'version' => 1, 'type' => 'expense', 'wallet_id' => $create['entity_id'], 'category_id' => $categoryId, 'amount_minor' => 2500, 'transaction_date' => now()->toDateString(), 'created_at' => now(), 'updated_at' => now()]);
+        $archive = $create;
+        $archive['operation_id'] = (string) Str::uuid();
+        $archive['action'] = 'delete';
+        $archive['base_version'] = '1';
+
+        $first = $this->postOperation($user, $archive)->assertOk()->json();
+        $second = $this->postOperation($user, $archive)->assertOk()->json();
+
+        $this->assertSame($first, $second);
+        $this->assertTrue($first['data']['record']['is_archived']);
+        $this->assertDatabaseHas('wallets', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 2, 'is_archived' => true]);
+        $this->assertDatabaseHas('transactions', ['id' => $transactionId, 'wallet_id' => $create['entity_id'], 'deleted_at' => null]);
+        $this->assertDatabaseCount('wallets', 1);
+        $this->assertDatabaseCount('transactions', 1);
+        $this->assertDatabaseCount('sync_operations', 2);
+        $this->assertDatabaseCount('sync_changes', 2);
+    }
+
+    public function test_another_user_cannot_archive_a_wallet(): void
+    {
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $create = $this->operation();
+        $this->postOperation($user, $create)->assertOk();
+        $archive = $create;
+        $archive['operation_id'] = (string) Str::uuid();
+        $archive['action'] = 'delete';
+        $archive['base_version'] = '1';
+
+        $this->postOperation($otherUser, $archive)->assertConflict()->assertJsonPath('error.code', 'REFERENCE_UNAVAILABLE');
+        $this->assertDatabaseHas('wallets', ['id' => $create['entity_id'], 'user_id' => $user->id, 'version' => 1, 'is_archived' => false]);
+    }
+
     /**
      * @param  array<string, mixed>  $operation
      */

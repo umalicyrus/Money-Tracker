@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { formatMinorUnits } from './money.ts'
-import { itemizedTotalMinor, itemizedTransactionItems } from './itemizedTotals.ts'
+import { itemizedTotalMinor, itemizedTransactionItems, requireMatchingItemSubtotal } from './itemizedTotals.ts'
 
 test('itemized expenses calculate exact centavo line and transaction totals', () => {
   const items = itemizedTransactionItems([
@@ -28,4 +28,15 @@ test('PHP formatting has thousands separators and exactly two decimal places', (
 test('itemized expenses reject invalid quantities and non-positive prices', () => {
   assert.throws(() => itemizedTransactionItems([{ name: 'Rice', quantity: '1.5', unitPrice: '450' }]))
   assert.throws(() => itemizedTransactionItems([{ name: 'Rice', quantity: '1', unitPrice: '0' }]))
+})
+
+test('item subtotal validation uses exact BigInt centavos and never changes the entered expense amount', () => {
+  const items = itemizedTransactionItems([
+    { name: 'Rice', quantity: '3', unitPrice: '0.10' },
+    { name: 'Egg', quantity: '2', unitPrice: '1,000.00'.replace(',', '') },
+  ])
+  assert.equal(items.reduce((sum, item) => sum + BigInt(item.lineTotalMinor), 0n).toString(), '200030')
+  assert.doesNotThrow(() => requireMatchingItemSubtotal('200030', items))
+  assert.throws(() => requireMatchingItemSubtotal('200029', items), /amount and items subtotal must match/)
+  assert.equal(formatMinorUnits('200030'), '₱2,000.30')
 })

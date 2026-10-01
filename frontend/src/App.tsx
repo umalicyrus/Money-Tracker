@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { useEffect, useState } from 'react'
-import LoginPage from './features/auth/pages/LoginPage'
+import AuthPage from './features/auth/pages/AuthPage'
 import DashboardPage from './features/dashboard/pages/DashboardPage'
 import { hasLocalWorkspace } from './features/wallets/lib/walletSync'
 import { api } from './lib/api/client'
@@ -11,6 +11,20 @@ export default function App() {
   const [userId, setUserId] = useState<string | null>(null)
   const [checking, setChecking] = useState(true)
   const [error, setError] = useState('')
+  const [authMode, setAuthMode] = useState<'login' | 'register'>(() => window.location.pathname === '/sign-up' ? 'register' : 'login')
+  const [registrationNotice, setRegistrationNotice] = useState(false)
+
+  useEffect(() => {
+    const onPopState = () => setAuthMode(window.location.pathname === '/sign-up' ? 'register' : 'login')
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  useEffect(() => {
+    if (!registrationNotice) return
+    const timeout = window.setTimeout(() => setRegistrationNotice(false), 6000)
+    return () => window.clearTimeout(timeout)
+  }, [registrationNotice])
 
   useEffect(() => {
     let active = true
@@ -37,7 +51,9 @@ export default function App() {
             setSignedIn(false)
           }
         } else if (!axios.isAxiosError(error) || error.response) {
-          setError('Unable to connect. Check the servers, then refresh.')
+          setError('Unable to verify your session. Please try signing in again.')
+        } else if (window.location.pathname === '/sign-up') {
+          setError('Creating an account requires an internet connection. Reconnect to continue.')
         } else {
           const cachedUserId = getLastVerifiedUser()
           if (cachedUserId) {
@@ -71,19 +87,26 @@ export default function App() {
     return <main className="dashboard">Checking your session…</main>
   }
 
-  if (error) {
-    return <main className="dashboard" role="alert">{error}</main>
-  }
-
   return signedIn
     ? <>
-        {userId && <DashboardPage userId={userId} onViewChange={() => undefined} onLogout={() => {
+        {userId && <DashboardPage userId={userId} registrationNotice={registrationNotice} onViewChange={() => undefined} onLogout={() => {
           setUserId(null)
           setSignedIn(false)
+          setRegistrationNotice(false)
+          setError('')
+          setAuthMode('login')
+          window.history.replaceState(null, '', '/sign-in')
         }} />}
       </>
-    : <LoginPage onLogin={(nextUserId) => {
+    : <AuthPage key={authMode} mode={authMode} sessionError={error} onModeChange={(mode) => {
+        setAuthMode(mode)
+        setError('')
+        window.history.pushState(null, '', mode === 'register' ? '/sign-up' : '/sign-in')
+      }} onAuthenticated={(nextUserId, registered) => {
         setUserId(nextUserId)
         setSignedIn(true)
+        setError('')
+        setRegistrationNotice(registered)
+        window.history.replaceState(null, '', '/')
       }} />
 }

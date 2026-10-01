@@ -8,17 +8,18 @@
     { "source": "/api/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/api/:path*" },
     { "source": "/sanctum/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/sanctum/:path*" },
     { "source": "/login", "destination": "https://money-tracker-production-3852.up.railway.app/login" },
+    { "source": "/register", "destination": "https://money-tracker-production-3852.up.railway.app/register" },
     { "source": "/logout", "destination": "https://money-tracker-production-3852.up.railway.app/logout" },
     { "source": "/up", "destination": "https://money-tracker-production-3852.up.railway.app/up" },
     { "source": "/storage/:path*", "destination": "https://money-tracker-production-3852.up.railway.app/storage/:path*" },
-    { "source": "/((?!api(?:/|$)|sanctum(?:/|$)|login(?:/|$)|logout(?:/|$)|up(?:/|$)|storage(?:/|$)|assets/|sw\\.js$|manifest\\.webmanifest$|app-icon\\.svg$|favicon\\.svg$|icons\\.svg$).*)", "destination": "/index.html" }
+    { "source": "/((?!api(?:/|$)|sanctum(?:/|$)|login(?:/|$)|register(?:/|$)|logout(?:/|$)|up(?:/|$)|storage(?:/|$)|assets/|sw\\.js$|manifest\\.webmanifest$|app-icon(?:-192|-512)\\.png$|apple-touch-icon\\.png$|favicon\\.png$|app-icon\\.svg$|favicon\\.svg$|icons\\.svg$).*)", "destination": "/index.html" }
   ],
   "headers": [
     { "source": "/:path*", "headers": [
       { "key": "X-Content-Type-Options", "value": "nosniff" },
       { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
     ] },
-    { "source": "/:service(api|sanctum|login|logout|up|storage)/:path*", "headers": [
+    { "source": "/:service(api|sanctum|login|register|logout|up|storage)/:path*", "headers": [
       { "key": "Cache-Control", "value": "private, no-store" },
       { "key": "CDN-Cache-Control", "value": "no-store" },
       { "key": "Vercel-CDN-Cache-Control", "value": "no-store" },

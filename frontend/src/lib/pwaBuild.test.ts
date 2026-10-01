@@ -38,7 +38,9 @@ test('built PWA precaches existing public files, including its manifest and icon
   listeners.get('install')?.({ waitUntil: (task: Promise<unknown>) => { done = task } })
   await done
   assert.ok(cachedPaths.includes('/manifest.webmanifest'))
-  assert.ok(cachedPaths.includes('/app-icon.svg'))
+  for (const icon of ['/app-icon-192.png', '/app-icon-512.png', '/apple-touch-icon.png', '/favicon.png']) {
+    assert.ok(cachedPaths.includes(icon), `Icon unavailable offline: ${icon}`)
+  }
   for (const path of cachedPaths) {
     assert.ok(existsSync(new URL(path === '/' ? 'index.html' : path.slice(1), dist)), `Missing precache file: ${path}`)
   }
@@ -46,7 +48,7 @@ test('built PWA precaches existing public files, including its manifest and icon
 
 test('built worker bypasses auth, sync, photos, health, cross-origin and non-GET requests', () => {
   const { listeners } = workerHarness()
-  for (const path of ['/api/user', '/api/v1/sync/records', '/api/v1/profile/photo', '/sanctum/csrf-cookie', '/login', '/logout', '/storage/private', '/up']) {
+  for (const path of ['/api/user', '/api/v1/sync/records', '/api/v1/profile/photo', '/sanctum/csrf-cookie', '/login', '/register', '/logout', '/storage/private', '/up']) {
     listeners.get('fetch')?.({ request: { url: `https://moneytracker.example${path}`, method: 'GET', mode: 'navigate' }, respondWith: () => assert.fail(`Cached private request ${path}`) })
   }
   for (const request of [

@@ -19,3 +19,15 @@ export function groupTransactionsByDay(transactions: Transaction[]): DailyTransa
   }
   return [...groups.values()].sort((left, right) => right.date.localeCompare(left.date))
 }
+
+export function initialOpenTransactionDate(dates: readonly string[], today: string): string | null {
+  return dates.includes(today) ? today : null
+}
+
+export function toggleOpenTransactionDate(openDate: string | null, date: string): string | null {
+  return openDate === date ? null : date
+}
+
+export function retainOpenTransactionDate(openDate: string | null, dates: readonly string[]): string | null {
+  return openDate !== null && dates.includes(openDate) ? openDate : null
+}
